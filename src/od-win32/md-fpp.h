@@ -225,6 +225,15 @@ STATIC_INLINE void to_exten_x(fptype *fp, uae_u32 wrd1, uae_u32 wrd2, uae_u32 wr
 		*fp = (wrd1 & 0x80000000) ? -0.0 : +0.0;
 		return;
 	}
+	// Exponent 0x7fff: Inf (fraction zero, explicit integer bit ignored)
+	// or NaN (fraction non-zero). ldexp() below would yield 0 or garbage.
+	if (((wrd1 >> 16) & 0x7fff) == 0x7fff) {
+		if (((wrd2 & 0x7fffffff) | wrd3) == 0)
+			*fp = (wrd1 & 0x80000000) ? -HUGE_VAL : HUGE_VAL;
+		else
+			*fp = (wrd1 & 0x80000000) ? -NAN : NAN;
+		return;
+	}
 	frac = ((double)wrd2 + ((double)wrd3 / twoto32)) / 2147483648.0;
 	if (wrd1 & 0x80000000)
 		frac = -frac;
@@ -241,6 +250,20 @@ STATIC_INLINE void from_exten_x(fptype fp, uae_u32 * wrd1, uae_u32 * wrd2, uae_u
 	fptype v;
 
 	v = fp;
+	// frexp() of Inf/NaN is unspecified and (uae_u32)Inf saturates on arm64.
+	// Emit the extended-precision Inf (fraction 0) and NaN (fraction all ones).
+	if (isinf(v)) {
+		*wrd1 = (signbit(v) ? 0x80000000 : 0) | 0x7fff0000;
+		*wrd2 = 0;
+		*wrd3 = 0;
+		return;
+	}
+	if (isnan(v)) {
+		*wrd1 = (signbit(v) ? 0x80000000 : 0) | 0x7fff0000;
+		*wrd2 = 0xffffffff;
+		*wrd3 = 0xffffffff;
+		return;
+	}
 	if (v == 0.0) {
 		*wrd1 = signbit(v) ? 0x80000000 : 0;
 		*wrd2 = 0;
