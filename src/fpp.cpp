@@ -2684,7 +2684,18 @@ static bool arithmetic_fp(fptype src, int reg, int extra)
 			break;
 		case 0x38: /* FCMP */
 			{
-				fptype tmp = regs.fp[reg].fp - src;
+				// a - b gives NaN for Inf - Inf (wrong NAN flag instead of Z).
+				// Compare instead: NaN is unordered, equal (also Inf == Inf)
+				// gives zero, otherwise a signed result without spurious
+				// overflow or inexact flags.
+				fptype a = regs.fp[reg].fp;
+				fptype tmp;
+				if (isnan(a) || isnan(src))
+					tmp = a + src;
+				else if (a == src)
+					tmp = 0.0;
+				else
+					tmp = a < src ? -1.0 : 1.0;
 				regs.fpsr = 0;
 				MAKE_FPSR (&tmp);
 			}
