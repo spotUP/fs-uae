@@ -5124,6 +5124,40 @@ static void intena_ring_dump (const char *why)
 		fprintf (f, "seq %u frame %u v %04x %04x->%04x pc %08x sr %04x a7 %08x (a7) %08x task %08x idn %d tdn %d '%s'\n",
 			e->seq, e->frame, e->v, e->before, e->after, e->pc, e->sr, e->a7, e->ret, e->task, e->idn, e->tdn, e->name);
 	}
+	/* CLI command name of the current task (a Run process is named "Background CLI") */
+	{
+		uae_u32 eb = ir_long (4), t = eb != 0xffffffff ? ir_long (eb + 0x114) : 0;
+		char cmd[64]; int i = 0;
+		if (t && t != 0xffffffff && valid_address (t, 0xb0) && get_byte (t + 8) == 13) {
+			uae_u32 cli = ir_long (t + 0xac) << 2;
+			uae_u32 cn = cli ? ir_long (cli + 16) << 2 : 0;
+			if (cn && valid_address (cn, 1)) {
+				int len = get_byte (cn);
+				for (; i < len && i < 63 && valid_address (cn + 1 + i, 1); i++) {
+					uae_u8 c = get_byte (cn + 1 + i);
+					cmd[i] = (c >= 32 && c < 127) ? c : '.';
+				}
+			}
+			fprintf (f, "thistask %08x cli %08x seglist %08x command '", t, cli, cli ? ir_long (cli + 60) << 2 : 0);
+		} else {
+			fprintf (f, "thistask %08x not a process command '", t);
+		}
+		cmd[i] = 0;
+		fprintf (f, "%s'\n", cmd);
+	}
+	/* code bytes at each distinct PC of the last 16 entries, to match against module files */
+	uae_u32 seen[16]; int ns = 0;
+	for (uae_u32 k = intena_ring_seq > 16 ? intena_ring_seq - 16 : 0; k < intena_ring_seq; k++) {
+		uae_u32 pc = intena_ring[k % INTENA_RING_N].pc;
+		int dup = 0;
+		for (int j = 0; j < ns; j++) dup |= seen[j] == pc;
+		if (dup) continue;
+		seen[ns++] = pc;
+		fprintf (f, "code %08x:", pc);
+		for (int b = 0; b < 64; b += 2)
+			fprintf (f, " %04x", valid_address (pc + b, 2) ? get_word (pc + b) : 0xffff);
+		fprintf (f, "\n");
+	}
 	fclose (f);
 }
 static void intena_ring_vsync (void)
