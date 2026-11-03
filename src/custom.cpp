@@ -5112,6 +5112,91 @@ static void intena_ring_record (uae_u16 v, uae_u16 before)
 		e->name[i] = 0;
 	}
 }
+/* Probe: every task (ThisTask, ready, waiting) with state, signals, saved SP and the stack longs up to tc_SPUpper,
+   every process's seglist hunks, every public semaphore's owner, every library's base and Open vector. */
+static void ir_name (uae_u32 a, char *out, int max)
+{
+	int i = 0;
+	if (a && a != 0xffffffff)
+		for (; i < max - 1 && valid_address (a + i, 1); i++) {
+			uae_u8 c = get_byte (a + i);
+			if (!c) break;
+			out[i] = (c >= 32 && c < 127) ? c : '.';
+		}
+	out[i] = 0;
+}
+static void ir_hunks (FILE *f, const char *what, uae_u32 b)
+{
+	for (int n = 0; b && n < 64; n++) {
+		uae_u32 a = b << 2;
+		if (!valid_address (a - 4, 8)) break;
+		fprintf (f, "  %s hunk %d %08x-%08x\n", what, n, a + 4, a - 4 + get_long (a - 4));
+		b = get_long (a);
+	}
+}
+static void ir_task (FILE *f, const char *list, uae_u32 t)
+{
+	char nm[64];
+	if (!valid_address (t, 0x40)) return;
+	ir_name (ir_long (t + 10), nm, sizeof nm);
+	uae_u32 sp = ir_long (t + 0x36), lo = ir_long (t + 0x3a), hi = ir_long (t + 0x3e);
+	fprintf (f, "task %s %08x '%s' type %d state %d idn %d tdn %d sigalloc %08x sigwait %08x sigrecvd %08x sp %08x lower %08x upper %08x\n",
+		list, t, nm, get_byte (t + 8), get_byte (t + 15), (uae_s8)get_byte (t + 16), (uae_s8)get_byte (t + 17),
+		ir_long (t + 18), ir_long (t + 22), ir_long (t + 26), sp, lo, hi);
+	if (get_byte (t + 8) == 13) {
+		uae_u32 cli = ir_long (t + 0xac) << 2;
+		fprintf (f, "  process cli %08x\n", cli);
+		if (cli && valid_address (cli, 64)) {
+			uae_u32 cn = ir_long (cli + 16) << 2; char cmd[64]; int i = 0;
+			if (cn && valid_address (cn, 1)) { int len = get_byte (cn); for (; i < len && i < 63; i++) { uae_u8 c = get_byte (cn + 1 + i); cmd[i] = (c >= 32 && c < 127) ? c : '.'; } }
+			cmd[i] = 0;
+			fprintf (f, "  command '%s'\n", cmd);
+			ir_hunks (f, "module", ir_long (cli + 60));
+		}
+		uae_u32 sa = ir_long (t + 0x80) << 2;
+		if (sa && valid_address (sa, 16)) {
+			uae_u32 cnt = get_long (sa);
+			for (uae_u32 i = 1; i <= cnt && i < 8; i++) { char w[16]; sprintf (w, "seg%u", i); ir_hunks (f, w, ir_long (sa + 4 * i)); }
+		}
+	}
+	if (valid_address (sp, 4) && hi > sp && hi - sp < 0x40000) {
+		uae_u32 end = hi - sp > 4096 ? sp + 4096 : hi;
+		for (uae_u32 a = sp; a < end; a += 32) {
+			fprintf (f, "  stk %08x:", a);
+			for (uae_u32 b = a; b < a + 32 && b < end; b += 4) fprintf (f, " %08x", ir_long (b));
+			fprintf (f, "\n");
+		}
+	}
+}
+static void intena_ring_walk (FILE *f)
+{
+	uae_u32 eb = ir_long (4);
+	if (eb == 0xffffffff) return;
+	fprintf (f, "--- walk: execbase %08x\n", eb);
+	ir_task (f, "this", ir_long (eb + 0x114));
+	static const struct { const char *n; uae_u32 off; } lists[] = { { "ready", 0x196 }, { "wait", 0x1a4 } };
+	for (int l = 0; l < 2; l++) {
+		uae_u32 n = ir_long (eb + lists[l].off);
+		for (int k = 0; n && n != 0xffffffff && ir_long (n) && k < 200; k++, n = ir_long (n))
+			ir_task (f, lists[l].n, n);
+	}
+	uae_u32 n = ir_long (eb + 0x214);
+	for (int k = 0; n && n != 0xffffffff && ir_long (n) && k < 200; k++, n = ir_long (n)) {
+		char nm[64]; ir_name (ir_long (n + 10), nm, sizeof nm);
+		uae_u32 w = ir_long (n + 16);
+		fprintf (f, "sem %08x '%s' nest %d queue %d owner %08x firstwaiter %08x\n", n, nm, (uae_s16)get_word (n + 14),
+			(uae_s16)get_word (n + 44), ir_long (n + 40), (w && ir_long (w)) ? ir_long (w + 8) : 0);
+	}
+	static const struct { const char *n; uae_u32 off; } libs[] = { { "lib", 0x17a }, { "dev", 0x15e }, { "res", 0x150 } };
+	for (int l = 0; l < 3; l++) {
+		n = ir_long (eb + libs[l].off);
+		for (int k = 0; n && n != 0xffffffff && ir_long (n) && k < 200; k++, n = ir_long (n)) {
+			char nm[64]; ir_name (ir_long (n + 10), nm, sizeof nm);
+			fprintf (f, "%s %08x '%s' neg %04x pos %04x open-vec %04x %08x\n", libs[l].n, n, nm, get_word (n + 16), get_word (n + 18),
+				get_word (n - 6), ir_long (n - 4));
+		}
+	}
+}
 static void intena_ring_dump (const char *why)
 {
 	FILE *f = fopen (intena_ring_path, "a");
@@ -5158,6 +5243,7 @@ static void intena_ring_dump (const char *why)
 			fprintf (f, " %04x", valid_address (pc + b, 2) ? get_word (pc + b) : 0xffff);
 		fprintf (f, "\n");
 	}
+	intena_ring_walk (f);
 	fclose (f);
 }
 static void intena_ring_vsync (void)
