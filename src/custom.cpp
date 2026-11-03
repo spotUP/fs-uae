@@ -5153,10 +5153,41 @@ static void ir_task (FILE *f, const char *list, uae_u32 t)
 			fprintf (f, "  command '%s'\n", cmd);
 			ir_hunks (f, "module", ir_long (cli + 60));
 		}
+		/* pr_Arguments (0xcc): the command line the CLI passed, e.g. Copy's source and destination */
+		{ char args[160]; ir_name (ir_long (t + 0xcc), args, sizeof args); fprintf (f, "  args '%s'\n", args); }
+		/* pr_MsgPort mp_MsgList (t+92+20): packets queued at this process (a handler's work queue) */
+		{
+			uae_u32 m = ir_long (t + 112); int cnt = 0;
+			for (; m && m != 0xffffffff && ir_long (m) && ir_long (m) != 0xffffffff && cnt < 32; cnt++, m = ir_long (m)) {
+				uae_u32 pk = ir_long (m + 10), rp = valid_address (pk, 24) ? ir_long (pk + 4) : 0;
+				char who[64]; ir_name (rp && valid_address (rp, 20) ? ir_long (ir_long (rp + 16) + 10) : 0, who, sizeof who);
+				fprintf (f, "  queued msg %08x pkt %08x type %d arg1 %08x from port %08x task '%s'\n", m, pk,
+					valid_address (pk, 24) ? (int)ir_long (pk + 8) : -1, valid_address (pk, 24) ? ir_long (pk + 20) : 0, rp, who);
+			}
+			fprintf (f, "  msgport queued %d\n", cnt);
+		}
 		uae_u32 sa = ir_long (t + 0x80) << 2;
 		if (sa && valid_address (sa, 16)) {
 			uae_u32 cnt = get_long (sa);
 			for (uae_u32 i = 1; i <= cnt && i < 8; i++) { char w[16]; sprintf (w, "seg%u", i); ir_hunks (f, w, ir_long (sa + 4 * i)); }
+		}
+	}
+	/* a task in Wait(SIGF_SINGLE): find the SemaphoreRequest {succ, pred, waiter=t} on its stack, follow ln_Succ to the
+	   ss_WaitQueue tail (node with succ 0 = &mlh_Tail = sem + 20) and print that semaphore and its owner */
+	if ((ir_long (t + 22) & 0x10) && valid_address (sp, 4) && hi > sp && hi - sp < 0x40000) {
+		for (uae_u32 a = sp; a + 12 <= hi; a += 2) {
+			if (ir_long (a + 8) != t) continue;
+			uae_u32 n = a, succ = ir_long (a); int k = 0;
+			if (!succ || succ == 0xffffffff || !valid_address (succ, 8)) continue;
+			while (k < 64 && succ && succ != 0xffffffff && valid_address (succ, 8)) { n = succ; succ = ir_long (n); k++; }
+			if (succ) continue;
+			uae_u32 sem = n - 20; char snm[64], onm[64];
+			ir_name (ir_long (sem + 10), snm, sizeof snm);
+			uae_u32 own = ir_long (sem + 40);
+			ir_name (own && valid_address (own, 16) ? ir_long (own + 10) : 0, onm, sizeof onm);
+			fprintf (f, "  waits-sem req %08x sem %08x '%s' nest %d queue %d owner %08x '%s' owner-sigwait %08x\n", a, sem, snm,
+				(uae_s16)get_word (sem + 14), (uae_s16)get_word (sem + 44), own, onm, own && valid_address (own, 30) ? ir_long (own + 22) : 0);
+			break;
 		}
 	}
 	if (valid_address (sp, 4) && hi > sp && hi - sp < 0x40000) {
