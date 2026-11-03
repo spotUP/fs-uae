@@ -5055,10 +5055,101 @@ static void send_intreq_do (uae_u32 v)
 	doint ();
 }
 
+/* vtcon S31-RIG96-FREEZE probe: ring of INTENA writes touching bit 14 (INTEN).
+   Enabled only when UPTERM_INTENA_RING names an output file. Dumped on SIGUSR2,
+   and once automatically when the CPU sits in STOP with INTEN clear for 250 frames.
+   PC under the JIT is the start of the compiled block holding the write. */
+#include <signal.h>
+struct intena_ring_ent {
+	uae_u32 seq, frame, pc, a7, ret, task;
+	uae_u16 v, before, after, sr;
+	uae_s8 idn, tdn;
+	char name[24];
+};
+#define INTENA_RING_N 256
+static struct intena_ring_ent intena_ring[INTENA_RING_N];
+static uae_u32 intena_ring_seq;
+static int intena_ring_on = -1;
+static const char *intena_ring_path;
+static int intena_ring_stopframes, intena_ring_dumped;
+static volatile sig_atomic_t intena_ring_sig;
+static void intena_ring_sigh (int s) { intena_ring_sig = 1; }
+static int intena_ring_enabled (void)
+{
+	if (intena_ring_on < 0) {
+		intena_ring_path = getenv ("UPTERM_INTENA_RING");
+		intena_ring_on = intena_ring_path && intena_ring_path[0];
+		if (intena_ring_on)
+			signal (SIGUSR2, intena_ring_sigh);
+	}
+	return intena_ring_on;
+}
+static uae_u32 ir_long (uaecptr a) { return valid_address (a, 4) ? get_long (a) : 0xffffffff; }
+static void intena_ring_record (uae_u16 v, uae_u16 before)
+{
+	struct intena_ring_ent *e = &intena_ring[intena_ring_seq % INTENA_RING_N];
+	e->seq = intena_ring_seq++;
+	e->frame = vsync_counter;
+	e->v = v; e->before = before; e->after = intena;
+	e->pc = M68K_GETPC;
+	e->sr = regs.sr;
+	e->a7 = m68k_areg (regs, 7);
+	e->ret = ir_long (e->a7);
+	uae_u32 eb = ir_long (4);
+	e->task = 0; e->idn = e->tdn = 0x55; e->name[0] = 0;
+	if (eb != 0xffffffff && valid_address (eb, 0x130)) {
+		e->idn = (uae_s8)get_byte (eb + 0x126);
+		e->tdn = (uae_s8)get_byte (eb + 0x127);
+		e->task = get_long (eb + 0x114);
+		uae_u32 np = e->task ? ir_long (e->task + 10) : 0xffffffff;
+		int i = 0;
+		if (np != 0xffffffff && np)
+			for (; i < 23 && valid_address (np + i, 1); i++) {
+				uae_u8 c = get_byte (np + i);
+				if (!c) break;
+				e->name[i] = (c >= 32 && c < 127) ? c : '.';
+			}
+		e->name[i] = 0;
+	}
+}
+static void intena_ring_dump (const char *why)
+{
+	FILE *f = fopen (intena_ring_path, "a");
+	if (!f) return;
+	fprintf (f, "=== INTENA ring dump (%s) frame %u seq %u intena %04x intena_int %04x intreq %04x stopped %d pc %08x sr %04x\n",
+		why, (unsigned)vsync_counter, (unsigned)intena_ring_seq, intena, intena_internal, intreq, regs.stopped, (unsigned)M68K_GETPC, regs.sr);
+	uae_u32 n = intena_ring_seq < INTENA_RING_N ? intena_ring_seq : INTENA_RING_N;
+	for (uae_u32 k = intena_ring_seq - n; k < intena_ring_seq; k++) {
+		struct intena_ring_ent *e = &intena_ring[k % INTENA_RING_N];
+		fprintf (f, "seq %u frame %u v %04x %04x->%04x pc %08x sr %04x a7 %08x (a7) %08x task %08x idn %d tdn %d '%s'\n",
+			e->seq, e->frame, e->v, e->before, e->after, e->pc, e->sr, e->a7, e->ret, e->task, e->idn, e->tdn, e->name);
+	}
+	fclose (f);
+}
+static void intena_ring_vsync (void)
+{
+	if (!intena_ring_enabled ())
+		return;
+	if (intena_ring_sig) {
+		intena_ring_sig = 0;
+		intena_ring_dump ("SIGUSR2");
+	}
+	if (regs.stopped && !(intena & 0x4000)) {
+		if (++intena_ring_stopframes == 250 && !intena_ring_dumped) {
+			intena_ring_dumped = 1;
+			intena_ring_dump ("auto: STOP with INTEN clear 250 frames");
+		}
+	} else {
+		intena_ring_stopframes = 0;
+	}
+}
+
 static void INTENA (uae_u16 v)
 {
 	uae_u16 old = intena;
 	setclr (&intena, v);
+	if ((v & 0x4000) && intena_ring_enabled ())
+		intena_ring_record (v, old);
 
 	if (!(v & 0x8000) && old == intena && intena == intena_internal)
 		return;
@@ -7656,6 +7747,7 @@ static void vsync_handler_pre (void)
 // emulated hardware vsync
 static void vsync_handler_post (void)
 {
+	intena_ring_vsync ();
 #ifdef FSUAE
 #if 0
     if (g_frame_debug_logging) {
