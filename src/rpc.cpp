@@ -394,7 +394,7 @@ void handle_events(void)
 
 int debuggable(void)
 {
-    return 0;
+    return 1;
 }
 
 int needmousehack(void)

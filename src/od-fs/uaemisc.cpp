@@ -86,6 +86,10 @@ void console_out_f(const TCHAR *fmt, ...) {
     va_start(arg_ptr, fmt);
     vprintf(fmt, arg_ptr);
     va_end(arg_ptr);
+    /* the console debugger's stdout is a file or FIFO when driven from outside (rig.py --debugger):
+     * block buffering held its output back until a few KB had piled up, so breakpoint hits were
+     * invisible until many dumps later. Flush every line. */
+    fflush(stdout);
 }
 
 /* FIXME: change void *f to FILE* f */
@@ -102,6 +106,7 @@ void f_out(void *f, const TCHAR *format, ...)
 
 void console_out (const TCHAR *msg) {
     printf("%s", msg);
+    fflush(stdout);
 }
 
 int console_get_gui (TCHAR *out, int maxlen) {
@@ -247,6 +252,14 @@ static RETSIGTYPE sigbrkhandler (int foo)
 #endif
 }
 #endif
+
+extern void activate_debugger (void);
+static void sigusr1_debugger (int) { activate_debugger (); }
+
+__attribute__((constructor)) static void install_sigusr1_debugger (void)
+{
+    signal (SIGUSR1, sigusr1_debugger);
+}
 
 void setup_brkhandler (void)
 {

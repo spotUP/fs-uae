@@ -2963,6 +2963,7 @@ kludge_me_do:
 // address = format $2 stack frame address field
 static void ExceptionX (int nr, uaecptr address)
 {
+	uaecptr fault_pc = m68k_getpc ();	/* debug build: the faulting PC, before the vector moves it into ROM */
 	regs.exception = nr;
 	if (cpu_tracer) {
 #ifdef FSUAE
@@ -2991,9 +2992,10 @@ static void ExceptionX (int nr, uaecptr address)
 			Exception_normal (nr);
 		}
 
-	if (debug_illegal && !in_rom (M68K_GETPC)) {
+	if (debug_illegal && !in_rom (fault_pc)) {
 		if (nr <= 63 && (debug_illegal_mask & ((uae_u64)1 << nr))) {
 			write_log (_T("Exception %d breakpoint\n"), nr);
+			console_out_f (_T("Exception %d breakpoint, fault PC %08x\n"), nr, fault_pc);
 			activate_debugger ();
 		}
 	}
