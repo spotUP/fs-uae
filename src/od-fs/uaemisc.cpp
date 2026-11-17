@@ -248,8 +248,12 @@ static RETSIGTYPE sigbrkhandler (int foo)
 }
 #endif
 
+extern void activate_debugger (void);
+static void sigusr1_debugger (int) { activate_debugger (); }
+
 void setup_brkhandler (void)
 {
+    signal (SIGUSR1, sigusr1_debugger);
     /*
 #if defined(__unix) && !defined(__NeXT__)
     struct sigaction sa;

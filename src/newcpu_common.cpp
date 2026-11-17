@@ -100,8 +100,10 @@ int movec_illg (int regno)
 	return 1;
 }
 
+extern void i1145_movec (int, uae_u32);
 int m68k_move2c (int regno, uae_u32 *regp)
 {
+	i1145_movec (regno, *regp);
 #if MOVEC_DEBUG > 0
 	write_log (_T("move2c %04X <- %08X PC=%x\n"), regno, *regp, M68K_GETPC);
 #endif

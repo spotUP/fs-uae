@@ -752,6 +752,64 @@ static void set_x_ifetches(void)
 }
 
 // indirect memory access functions
+/* I1145 run 4: memory-write watch */
+static void (*i1145_o_pl)(uaecptr,uae_u32); static void (*i1145_o_pw)(uaecptr,uae_u32); static void (*i1145_o_pb)(uaecptr,uae_u32);
+struct i1145_w { uae_u32 a, v, pc; int sz; };
+static struct i1145_w i1145_wr[64]; static unsigned i1145_wn; static int i1145_hits, i1145_dumped;
+static void i1145_wlog (const char *tag, struct i1145_w *w)
+{
+	write_log (_T("I1145W %s a=%08x sz=%d v=%08x pc=%08x op=%04x\n"), tag, w->a, w->sz, w->v, w->pc, get_word (w->pc));
+}
+static void i1145_olog_dump (const char *why);
+static struct i1145_w i1145_fw[1024]; static unsigned i1145_fwn;
+static struct i1145_w i1145_xw[65536]; static unsigned i1145_xwn;
+static struct i1145_w i1145_bw[4096]; static unsigned i1145_bwn;
+struct i1145_fr { uae_u32 sp, pc, rpc; uae_u16 sr, fv; };
+static struct i1145_fr i1145_frr[16]; static unsigned i1145_frn;
+static void i1145_bwdump (uae_u32 lo, uae_u32 hi, int maxn)
+{
+	int n = 0; for (unsigned k = 1; k <= 4096 && k <= i1145_bwn && n < maxn; k++) { struct i1145_w *o = &i1145_bw[(i1145_bwn - k) & 4095]; if (o->a + o->sz > lo && o->a < hi) { i1145_wlog ("R8wr", o); n++; } }
+}
+static void i1145_frdump (const char *why)
+{
+	for (unsigned k = 1; k <= 8 && k <= i1145_frn; k++) { struct i1145_fr *f = &i1145_frr[(i1145_frn - k) & 15]; write_log (_T("I1145R8 %s lastRTE[-%u] at=%08x sp=%08x sr=%04x pc=%08x fv=%04x\n"), why, k, f->rpc, f->sp, f->sr, f->pc, f->fv); }
+}
+static uae_u32 i1145_lo, i1145_hi;
+static void i1145_w (uaecptr a, uae_u32 v, int sz)
+{
+	if (a >= 0x40000846 && a < 0x4000084e && get_long (4) == 0x40000810) {
+		static int nlog; if (nlog++ < 40) write_log (_T("I1145S write a=%08x sz=%d v=%08x pc=%08x (SysStkUpper@846 SysStkLower@84a)\n"), a, sz, v, regs.instruction_pc);
+	}
+	if (a >= 0x40000000 && ((sz == 4 && (v >> 8) == 0xf030) || (sz == 4 && (v >> 16) == 0x00f0) || (sz == 2 && v == 0xf030))) { struct i1145_w *q = &i1145_fw[i1145_fwn++ & 1023]; q->a = a; q->v = v; q->sz = sz; q->pc = regs.instruction_pc; }
+	if (a >= 0x40000000 && sz >= 2) { struct i1145_w *q = &i1145_xw[i1145_xwn++ & 65535]; q->a = a; q->v = v; q->sz = sz; q->pc = regs.instruction_pc; }
+	if (a >= 0x40002200 && a < 0x40002290) { struct i1145_w *q = &i1145_bw[i1145_bwn++ & 4095]; q->a = a; q->v = v; q->sz = sz; q->pc = regs.instruction_pc; }
+	if (a < 0x40002200 || a >= 0x40002400) return;
+	struct i1145_w w; w.a = a; w.v = v; w.sz = sz; w.pc = regs.instruction_pc;
+	int hit = (sz == 2 && (v & 0xffff) == 0x4ef9) || (sz == 4 && ((v >> 16) == 0x4ef9 || (v & 0xffff) == 0x4ef9));
+	if (!hit) { i1145_wr[i1145_wn++ & 63] = w; return; }
+	if (i1145_hits++ >= 300) return;
+	if (!i1145_dumped) { i1145_dumped = 1; for (unsigned k = 64; k > 0; k--) { struct i1145_w *o = &i1145_wr[(i1145_wn - k) & 63]; if (o->sz) i1145_wlog ("prev", o); } }
+	uae_u32 eb = get_long (4), tt = eb ? get_long (eb + 276) : 0, nm = tt ? get_long (tt + 10) : 0; char nb[40]; int i;
+	for (i = 0; i < 39; i++) { nb[i] = nm ? get_byte (nm + i) : 0; if (!nb[i]) break; if (nb[i] < 32 || nb[i] > 126) nb[i] = '?'; } nb[i] = 0;
+	i1145_wlog ("HIT", &w);
+	{ static int d1; if (!d1++) i1145_olog_dump ("first 4EF9 hit"); }
+	write_log (_T("I1145W   task=%08x '%s' SR=%04x A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x D0=%08x D1=%08x\n"), tt, nb, regs.sr,
+		m68k_areg (regs, 0), m68k_areg (regs, 1), m68k_areg (regs, 2), m68k_areg (regs, 3), m68k_areg (regs, 4), m68k_areg (regs, 5), m68k_areg (regs, 6), m68k_areg (regs, 7), m68k_dreg (regs, 0), m68k_dreg (regs, 1));
+}
+static addrbank i1145_orig, i1145_copy; static int i1145_inst;
+static void i1145_pl (uaecptr a, uae_u32 v) { i1145_w (a, v, 4); i1145_orig.lput (a, v); }
+static void i1145_pw (uaecptr a, uae_u32 v) { i1145_w (a, v, 2); i1145_orig.wput (a, v); }
+static void i1145_pb (uaecptr a, uae_u32 v) { i1145_w (a, v, 1); i1145_orig.bput (a, v); }
+static void i1145_install (void)
+{
+	addrbank *cur = mem_banks[0x4000];
+	if (cur == &i1145_copy) return;
+	i1145_orig = *cur; i1145_copy = *cur;
+	i1145_copy.lput = i1145_pl; i1145_copy.wput = i1145_pw; i1145_copy.bput = i1145_pb;
+	for (int ix = 0x4000; ix < 0x4100; ix++) if (mem_banks[ix] == cur) mem_banks[ix] = &i1145_copy;
+	if (i1145_inst++ < 5) write_log (_T("I1145W installed on bank '%s' idx 4000 (#%d)\n"), cur->name, i1145_inst);
+}
+
 static void set_x_funcs (void)
 {
 	if (currprefs.mmu_model) {
@@ -2743,6 +2801,328 @@ static void add_approximate_exception_cycles(int nr)
 	x_do_cycles(cycles);
 }
 
+
+/* I1145 run 5: supervisor stack trap */
+struct i1145_ol { char nm[48]; uae_u32 tn, a; int dev; };
+static struct i1145_ol i1145_olr[16]; static unsigned i1145_oln;
+static uae_u32 i1145_pcr[16]; static unsigned i1145_pn;
+static uae_u32 i1145_olpc, i1145_odpc; static unsigned i1145_cnt; static int i1145_out, i1145_traps, i1145_init;
+static void i1145_tname (uae_u32 tt, char *nb)
+{
+	uae_u32 nm = tt ? get_long (tt + 10) : 0; int i;
+	for (i = 0; i < 39; i++) { nb[i] = nm ? get_byte (nm + i) : 0; if (!nb[i]) break; if (nb[i] < 32 || nb[i] > 126) nb[i] = '?'; } nb[i] = 0;
+}
+static void i1145_olog_dump (const char *why)
+{
+	write_log (_T("I1145S open ring (%s), newest first:\n"), why);
+	for (unsigned k = 1; k <= 16 && k <= i1145_oln; k++) { struct i1145_ol *o = &i1145_olr[(i1145_oln - k) & 15]; write_log (_T("I1145S   %s task=%08x name='%s'\n"), o->dev ? "OpenDevice " : "OpenLibrary", o->tn, o->nm); }
+}
+static void i1145_dump (const char *why)
+{
+	char nb[40]; uae_u32 tt = get_long (get_long (4) + 276); i1145_tname (tt, nb);
+	write_log (_T("I1145S TRAP %s: pc=%08x op=%04x SR=%04x A7=%08x ISP=%08x MSP=%08x USP=%08x SysStkLower=%08x SysStkUpper=%08x task=%08x '%s'\n"),
+		why, regs.instruction_pc, get_word (regs.instruction_pc), regs.sr, m68k_areg (regs, 7), regs.isp, regs.msp, regs.usp, i1145_lo, i1145_hi, tt, nb);
+	for (unsigned k = 1; k <= 16; k++) write_log (_T("I1145S   pc[-%u]=%08x\n"), k, i1145_pcr[(i1145_pn - k) & 15]);
+	for (int i = 0; i < 8; i++) write_log (_T("I1145S   D%d=%08x A%d=%08x\n"), i, m68k_dreg (regs, i), i, m68k_areg (regs, i));
+	for (int i = -4; i < 12; i++) write_log (_T("I1145S   stk %08x: %08x\n"), m68k_areg (regs, 7) + i * 4, get_long (m68k_areg (regs, 7) + i * 4));
+	i1145_olog_dump (why);
+}
+void i1145_movec (int regno, uae_u32 v)
+{
+	if (!i1145_hi || (regno != 0x800 && regno != 0x803 && regno != 0x804)) return;
+	static int n; if (n++ >= 12) return;
+	write_log (_T("I1145S MOVEC to %03x v=%08x (SysStk %08x..%08x)\n"), regno, v, i1145_lo, i1145_hi);
+	i1145_dump ("movec-isp");
+}
+static void i1145_alert (const char *how);
+static void i1145_r7 (uae_u32 fa_in);
+static uae_u32 i1145_v26; static int i1145_v26n;
+static void i1145_v26chk (void)
+{
+	uae_u32 v = get_long (regs.vbr + 0x68);
+	if (v == i1145_v26) return;
+	i1145_v26 = v;
+	if (v < 0x40000000 || i1145_v26n++ >= 4) return;
+	uae_u32 eb = get_long (4), tt = eb ? get_long (eb + 276) : 0; char nb[40]; i1145_tname (tt, nb);
+	write_log (_T("I1145 R7 V26 changed to %08x vbr=%08x task=%08x '%s' type=%u\n"), v, regs.vbr, tt, nb, tt ? get_byte (tt + 8) : 0);
+	for (unsigned k = 1; k <= 6; k++) { uae_u32 q = i1145_pcr[(i1145_pn - k) & 15]; write_log (_T("I1145 R7 V26   pc[-%u]=%08x op=%04x\n"), k, q, get_word (q)); }
+	if (tt && get_byte (tt + 8) == 13) { uae_u32 cli = get_long (tt + 172) << 2; if (cli) { uae_u32 cn = get_long (cli + 16) << 2; char cb[40]; int j; for (j = 0; j < 38 && cn; j++) { cb[j] = get_byte (cn + 1 + j); if (!cb[j] || j >= get_byte (cn)) break; } cb[j] = 0; write_log (_T("I1145 R7 V26   cli_CommandName='%s'\n"), cb); } }
+	i1145_olog_dump ("V26");
+	i1145_r7 (v);
+}
+static void i1145_r9save (uae_u32 sp, uae_u32 q);
+static void i1145_r9rte (uae_u32 q);
+static uae_u32 i1145_hist_pc[65536], i1145_hist_n[65536]; static int i1145_wd_up;
+static void i1145_wd_start (void);
+void i1145_step (void)
+{
+	i1145_v26chk ();
+	uae_u32 pc = regs.instruction_pc;
+	{ unsigned hx = (pc >> 1) & 65535; i1145_hist_pc[hx] = pc; i1145_hist_n[hx]++; }
+	if (!i1145_wd_up) i1145_wd_start ();
+	i1145_pcr[i1145_pn++ & 15] = pc;
+	if (pc == 0xf83616) i1145_alert ("step-entry");
+	if (pc == 0x4003b522 || pc == 0x4003b502) { static int nc; uae_u32 a5 = m68k_areg (regs, 5); uae_u32 q = get_long (a5); if (q & 1 || !(q < 0x200000 || (q >= 0xf80000 && q < 0x1000000) || (q >= 0x40000000 && q < 0x50000000)) || (q >> 8) == 0xf030) { if (nc++ < 4) { write_log (_T("I1145R8 COPY a5=%08x pcsrc=%08x task=%08x\n"), a5, q, get_long (get_long (4) + 276)); for (unsigned k = 1; k <= 1024 && k <= i1145_fwn; k++) { struct i1145_w *o = &i1145_fw[(i1145_fwn - k) & 1023]; if (o->a + 6 > a5 - 16 && o->a < a5 + 16) i1145_wlog ("R8fw", o); } } } }
+	if (pc == 0x4003b368) { uae_u32 sp = m68k_areg (regs, 7), q = get_long (sp); int bad = (q & 1) || !(q < 0x200000 || (q >= 0xf00000 && q < 0xf80000) || (q >= 0xf80000 && q < 0x1000000) || (q >= 0x40000000 && q < 0x50000000));
+		static int nsv, nn; if (!bad) { if (nn++ < 2) write_log (_T("I1145R9 SAVE ok sp=%08x pc=%08x a5=%08x sr=%04x\n"), sp, q, m68k_areg (regs, 5), regs.sr); }
+		else if (nsv++ < 6) i1145_r9save (sp, q); }
+	if (pc >= 0x4003a9fc && pc < 0x4003bb00 && get_word (pc) == 0x4e73) {
+		uae_u32 sp = m68k_areg (regs, 7); struct i1145_fr *f = &i1145_frr[i1145_frn++ & 15];
+		f->rpc = pc; f->sp = sp; f->sr = get_word (sp); f->pc = get_long (sp + 2); f->fv = get_word (sp + 6);
+		static int nr8log; uae_u32 q = f->pc;
+		int ok = !(q & 1) && (q < 0x200000 || (q >= 0xf00000 && q < 0x1000000) || (q >= 0x40000000 && q < 0x50000000));
+		if (nr8log < 3000 || !ok) { nr8log++; write_log (_T("I1145R8 RTE at=%08x sp=%08x sr=%04x pc=%08x fv=%04x S=%d%s\n"), pc, sp, f->sr, f->pc, f->fv, regs.s, ok ? "" : " BAD-PC"); }
+		if (!ok) { static int nb; if (nb++ < 3) { write_log (_T("I1145R8 BAD a5=%08x ctxsrc: %08x %08x %08x %08x\n"), m68k_areg (regs, 5), get_long (m68k_areg (regs, 5) - 6), get_long (m68k_areg (regs, 5) - 2), get_long (m68k_areg (regs, 5) + 2), get_long (m68k_areg (regs, 5) + 6));
+			for (unsigned k = 1; k <= 1024 && k <= i1145_fwn; k++) { struct i1145_w *o = &i1145_fw[(i1145_fwn - k) & 1023]; if (o->a + 6 > m68k_areg (regs, 5) - 16 && o->a < m68k_areg (regs, 5) + 16) i1145_wlog ("R8fw", o); } i1145_bwdump (sp, sp + 8, 8); i1145_bwdump (0x40002200, 0x40002290, 40); i1145_r9rte (q); } }
+	}
+	if (!i1145_init) { i1145_init = 1; write_log (_T("I1145S step hook active\n")); }
+	if ((++i1145_cnt & 0xfff) == 0 && get_long (4) == 0x40000810) {
+		uae_u32 eb = 0x40000810, hi = get_long (eb + 54), lo = get_long (eb + 58);
+		if ((hi != i1145_hi || lo != i1145_lo) && (hi || lo)) { write_log (_T("I1145S SysStk Upper=%08x Lower=%08x (pc=%08x)\n"), hi, lo, pc); i1145_hi = hi; i1145_lo = lo; }
+		i1145_olpc = get_word (eb - 552) == 0x4ef9 ? get_long (eb - 552 + 2) : 0;
+		i1145_odpc = get_word (eb - 444) == 0x4ef9 ? get_long (eb - 444 + 2) : 0;
+	}
+	if (pc && (pc == i1145_olpc || pc == i1145_odpc)) {
+		struct i1145_ol *o = &i1145_olr[i1145_oln++ & 15]; int dev = pc == i1145_odpc; uae_u32 np = m68k_areg (regs, dev ? 0 : 1); int i;
+		o->dev = dev; o->tn = get_long (get_long (4) + 276);
+		for (i = 0; i < 46; i++) { o->nm[i] = get_byte (np + i); if (!o->nm[i]) break; if (o->nm[i] < 32 || o->nm[i] > 126) o->nm[i] = '?'; } o->nm[i] = 0;
+	}
+	if (i1145_hi && i1145_lo && regs.s) {
+		uae_u32 a7 = m68k_areg (regs, 7);
+		if (a7 < i1145_lo || a7 > i1145_hi) {
+			if (!i1145_out) { i1145_out = 1; if (i1145_traps++ < 3) i1145_dump ("A7 left SysStk"); }
+		} else i1145_out = 0;
+	}
+}
+
+struct i1145_ex { int nr; uae_u32 pc, sr, a7, tn; };
+struct i1145_ex i1145_ring[1024]; unsigned i1145_rn;
+
+static void i1145_alert (const char *how)
+{
+	static int na; if (na++ >= 6) return;
+	char nb[40]; uae_u32 eb = get_long (4), tt = eb ? get_long (eb + 276) : 0; i1145_tname (tt, nb);
+	uae_u32 a7 = m68k_areg (regs, 7);
+	write_log (_T("I1145A ALERT %s #%d pc=%08x instrpc=%08x D7=%08x A7=%08x SR=%04x S=%d ISP=%08x USP=%08x task=%08x '%s'\n"), how, na, m68k_getpc (), regs.instruction_pc, m68k_dreg (regs, 7), a7, regs.sr, regs.s, regs.isp, regs.usp, tt, nb);
+	write_log (_T("I1145A   frame: w[0]=%04x l[2]=%08x w[6]=%04x  stk+8..: %08x %08x %08x %08x\n"), get_word (a7), get_long (a7 + 2), get_word (a7 + 6), get_long (a7 + 8), get_long (a7 + 12), get_long (a7 + 16), get_long (a7 + 20));
+	for (int i = 0; i < 8; i++) write_log (_T("I1145A   D%d=%08x A%d=%08x\n"), i, m68k_dreg (regs, i), i, m68k_areg (regs, i));
+	for (unsigned k = 1; k <= 16; k++) write_log (_T("I1145A   pc[-%u]=%08x op=%04x\n"), k, i1145_pcr[(i1145_pn - k) & 15], get_word (i1145_pcr[(i1145_pn - k) & 15]));
+	for (unsigned k = 0; k < 16 && k < i1145_rn; k++) { struct i1145_ex *e = &i1145_ring[(i1145_rn - 1 - k) & 1023]; write_log (_T("I1145A   ex[-%u] nr=%d pc=%08x op=%04x sr=%04x a7=%08x task=%08x\n"), k + 1, e->nr, e->pc, get_word (e->pc), e->sr, e->a7, e->tn); }
+}
+static void i1145_r7 (uae_u32 fa_in)
+{ /* run 7 */
+	uae_u32 eb = get_long (4); static const int offs[3] = { 0x17a, 0x15e, 0x150 };
+		  uae_u32 pc0 = m68k_getpc (); uae_u32 fa = fa_in; int i;
+		  for (i = -96; i < 32; i += 16) { char as[17]; for (int j = 0; j < 16; j++) { uae_u8 b = get_byte (fa + i + j); as[j] = (b >= 32 && b < 127) ? b : '.'; } as[16] = 0;
+		    write_log (_T("I1145 R7 hex %08x: %08x %08x %08x %08x %s\n"), fa + i, get_long (fa + i), get_long (fa + i + 4), get_long (fa + i + 8), get_long (fa + i + 12), as); }
+		  for (i = 0; i < 24; i++) { uae_u32 a = (fa & ~0xffu) - 0x1000 + i * 0; (void)a; }
+		  /* ascii strings in 4 KB before pc */
+		  { uae_u32 b0 = fa - 0x800; char cur[80]; int cl = 0; for (uae_u32 a = b0; a < fa + 0x100; a++) { uae_u8 c = get_byte (a); if (c >= 32 && c < 127 && cl < 78) cur[cl++] = c; else { if (cl >= 6) { cur[cl] = 0; write_log (_T("I1145 R7 str %08x '%s'\n"), a - cl, cur); } cl = 0; } } }
+		  /* memory list */
+		  { uae_u32 n = get_long (eb + 0x142); int g = 0; for (; n && g < 20; g++) { uae_u32 nx = get_long (n); if (!nx) break; write_log (_T("I1145 R7 memhdr %08x attr=%04x lower=%08x upper=%08x free=%08x\n"), n, get_word (n + 14), get_long (n + 20), get_long (n + 24), get_long (n + 28)); n = nx; } }
+		  /* tasks */
+		  static const int toffs[2] = { 0x196, 0x1a4 };
+		  uae_u32 tl[40]; int nt = 0; tl[nt++] = get_long (eb + 276);
+		  for (int l = 0; l < 2; l++) { uae_u32 n = get_long (eb + toffs[l]); int g = 0; for (; n && g < 30 && nt < 40; g++) { uae_u32 nx = get_long (n); if (!nx) break; tl[nt++] = n; n = nx; } }
+		  for (int k = 0; k < nt; k++) { uae_u32 t = tl[k]; char nb[40]; i1145_tname (t, nb);
+		    uae_u32 tt = get_byte (t + 8), spl = get_long (t + 58), spu = get_long (t + 62), spr = get_long (t + 54), ent = get_long (t + 0x1c + 0);
+		    write_log (_T("I1145 R7 task %08x type=%u '%s' spreg=%08x lower=%08x upper=%08x%s\n"), t, tt, nb, spr, spl, spu, (fa >= spl && fa < spu) ? " PC-IN-STACK" : "");
+		    (void)ent;
+		    if (tt == 13) {
+		      uae_u32 sa = get_long (t + 128) << 2; uae_u32 cli = get_long (t + 172) << 2; uae_u32 segs[8]; int ns = 0;
+		      if (sa) { uae_u32 n = get_long (sa); for (int q = 1; q <= (int)n && q <= 4; q++) segs[ns++] = get_long (sa + q * 4); }
+		      if (cli) segs[ns++] = get_long (cli + 60);
+		      for (int q = 0; q < ns; q++) { uae_u32 sg = segs[q]; int g = 0; while (sg && g < 64) { uae_u32 ba = sg << 2; uae_u32 sz = get_long (ba - 4);
+		        if (fa >= ba && fa < ba + sz) write_log (_T("I1145 R7 *** PC IN SEGMENT %08x size=%08x of task %08x '%s' slot %d\n"), ba, sz, t, nb, q);
+		        sg = get_long (ba); g++; } }
+		      write_log (_T("I1145 R7   proc segs=%d sa=%08x cli=%08x\n"), ns, sa, cli);
+		    }
+		  }
+		  /* patched vectors pointing near pc */
+		  for (int l = 0; l < 3; l++) { uae_u32 n = get_long (eb + offs[l]); int g = 0; for (; n && g < 80; g++) { uae_u32 nx = get_long (n); if (!nx) break; int neg = get_word (n + 16);
+		      char nb[32]; uae_u32 nm = get_long (n + 10); int j; for (j = 0; j < 31; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+		      for (int v = 6; v <= neg; v += 6) { if (get_word (n - v) == 0x4ef9) { uae_u32 tgt = get_long (n - v + 2); if (tgt >= (fa & ~0xfffu) - 0x3000 && tgt < (fa | 0xfffu) + 0x3000) write_log (_T("I1145 R7 vec list%d '%s' -%d -> %08x\n"), l, nb, v, tgt); } }
+		      n = nx; } }
+		  for (int l = 0; l < 3; l++) { uae_u32 n = get_long (eb + offs[l]); int g = 0; for (; n && g < 80; g++) { uae_u32 nx = get_long (n); if (!nx) break; int neg = get_word (n + 16), pos = get_word (n + 18);
+		      char nb[32]; uae_u32 nm = get_long (n + 10); int j; for (j = 0; j < 31; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+		      write_log (_T("I1145 R7 list%d %08x-%08x '%s'%s\n"), l, n - neg, n + pos, nb, (fa >= n - neg - 0x8000 && fa < n + pos + 0x8000) ? " NEAR-PC" : ""); n = nx; } }
+		  /* romtag scan + seglist owner via library private fields */
+		  for (uae_u32 a = (fa & ~1u) - 0x4000; a < fa + 0x4000; a += 2) if (get_word (a) == 0x4afc && get_long (a + 2) == a) {
+		      uae_u32 nm = get_long (a + 14), id = get_long (a + 18); char nb[40], ib[60]; int j;
+		      for (j = 0; j < 39; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+		      for (j = 0; j < 59; j++) { ib[j] = get_byte (id + j); if (!ib[j]) break; if (ib[j] < 32 || ib[j] > 126) ib[j] = '?'; } ib[j] = 0;
+		      write_log (_T("I1145 R7 ROMTAG %08x endskip=%08x flags=%02x type=%u name='%s' id='%s'\n"), a, get_long (a + 6), get_byte (a + 10), get_byte (a + 12), nb, ib); }
+		  for (int l = 0; l < 2; l++) { uae_u32 n = get_long (eb + offs[l]); int g = 0; for (; n && g < 80; g++) { uae_u32 nx = get_long (n); if (!nx) break;
+		      char nb[32]; uae_u32 nm = get_long (n + 10); int j; for (j = 0; j < 31; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+		      for (int off = 34; off <= 46; off += 4) { uae_u32 sg = get_long (n + off); if (!sg || (sg & 0xc0000000) || sg < 0x1000) continue; int gg = 0;
+		        while (sg && gg < 40) { uae_u32 ba = sg << 2; if (ba < 0x1000 || ba > 0x4fffffff) break; uae_u32 sz = get_long (ba - 4);
+		          if (sz < 0x4000000 && fa >= ba && fa < ba + sz) write_log (_T("I1145 R7 *** OWNER lib/dev '%s' node %08x via +%d: PC in seg %08x size %08x\n"), nb, n, off, ba, sz);
+		          sg = get_long (ba); gg++; } }
+		      n = nx; } }
+		  /* resident modules */
+		  { uae_u32 rm = get_long (eb + 300); int g = 0; for (; rm && g < 200; g++) { uae_u32 r = get_long (rm + g * 4); if (!r) break; if (r & 0x80000000) { rm = r & 0x7fffffff; g = -1; continue; }
+		      uae_u32 nm = get_long (r + 14); char nb[32]; int j; for (j = 0; j < 31; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+		      uae_u32 en = get_long (r + 2); if (r >= 0x40000000 || (fa >= r && fa < en)) write_log (_T("I1145 R7 resident %08x-%08x '%s'%s\n"), r, en, nb, (fa >= r && fa < en) ? " PC-HERE" : ""); } }
+		  write_log (_T("I1145 R7 A5 mem: %08x %08x %08x %08x %08x %08x\n"), get_long (m68k_areg (regs, 5)), get_long (m68k_areg (regs, 5) + 4), get_long (m68k_areg (regs, 5) + 8), get_long (m68k_areg (regs, 5) + 12), get_long (m68k_areg (regs, 5) + 16), get_long (m68k_areg (regs, 5) + 20));
+		  (void)pc0;
+		}
+
+static void i1145_r9ops (const char *t, uae_u32 q)
+{
+	write_log (_T("I1145R9 %s ops at %08x:"), t, q); for (int i = 0; i < 8; i++) write_log (_T(" %04x"), get_word (q + i * 2)); write_log (_T("\n"));
+}
+static void i1145_r9tasks (const char *t)
+{
+	uae_u32 eb = get_long (4), tt = eb ? get_long (eb + 276) : 0; char nb[40], nb2[40]; i1145_tname (tt, nb); i1145_tname (0x400238a8, nb2);
+	write_log (_T("I1145R9 %s ThisTask=%08x '%s' state=%u  task400238a8 '%s' type=%u state=%u sigwait=%08x\n"), t, tt, nb, tt ? get_byte (tt + 15) : 0, nb2, get_byte (0x400238a8 + 8), get_byte (0x400238a8 + 15), get_long (0x400238a8 + 22));
+}
+static void i1145_r9exr (void)
+{
+	for (unsigned k = 1; k <= 12 && k <= i1145_rn; k++) { struct i1145_ex *e = &i1145_ring[(i1145_rn - k) & 1023]; write_log (_T("I1145R9   exc[-%u] nr=%d pc=%08x sr=%04x a7=%08x task=%08x\n"), k, e->nr, e->pc, e->sr, e->a7, e->tn); }
+}
+static void i1145_r9save (uae_u32 sp, uae_u32 q)
+{
+	write_log (_T("I1145R9 SAVE-BAD sp=%08x pcword=%08x a5=%08x sr=%04x isp=%08x msp=%08x usp=%08x\n"), sp, q, m68k_areg (regs, 5), regs.sr, regs.isp, regs.msp, regs.usp);
+	write_log (_T("I1145R9   stk:")); for (int i = -2; i < 6; i++) write_log (_T(" %08x"), get_long (sp + i * 4)); write_log (_T("\n"));
+	write_log (_T("I1145R9   code b360:")); for (int i = 0; i < 12; i++) write_log (_T(" %04x"), get_word (0x4003b358 + i * 2)); write_log (_T("\n"));
+	i1145_r9ops ("badpc", q); i1145_r9tasks ("save");
+	int n = 0; for (unsigned k = 1; k <= 65536 && k <= i1145_xwn && n < 6; k++) { struct i1145_w *o = &i1145_xw[(i1145_xwn - k) & 65535]; if (o->a + o->sz > sp - 2 && o->a < sp + 8) { write_log (_T("I1145R9   stkwr[%d] a=%08x sz=%d v=%08x writer_pc=%08x op=%04x (k=%u back)\n"), n, o->a, o->sz, o->v, o->pc, get_word (o->pc), k); n++; } }
+	if (!n) write_log (_T("I1145R9   no write to the slot in the last 65536 writes of 40000000+\n"));
+	for (unsigned k = 1; k <= 16; k++) { uae_u32 x = i1145_pcr[(i1145_pn - k) & 15]; write_log (_T("I1145R9   pc[-%u]=%08x op=%04x\n"), k, x, get_word (x)); }
+	i1145_r9exr ();
+}
+static void i1145_r9rte (uae_u32 q)
+{
+	i1145_r9ops ("rte-badpc", q); i1145_r9tasks ("rte"); i1145_r9exr ();
+}
+
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/stat.h>
+static int i1145_inrange (uae_u32 a, uae_u32 lo, uae_u32 hi) { return lo && a >= lo && a < hi; }
+static void i1145_nm (uae_u32 p, char *nb) { int i; for (i = 0; i < 39; i++) { nb[i] = p ? get_byte (p + i) : 0; if (!nb[i]) break; if (nb[i] < 32 || nb[i] > 126) nb[i] = '?'; } nb[i] = 0; }
+static void i1145_owner (uae_u32 a)
+{
+	uae_u32 eb = get_long (4); char nb[48]; int found = 0;
+	write_log (_T("I1145R10 owner(%08x):\n"), a);
+	// resident modules
+	uae_u32 rm = get_long (eb + 300);
+	for (int i = 0; rm && i < 400; i++) {
+		uae_u32 rt = get_long (rm + i * 4);
+		if (!rt) break;
+		if (rt & 0x80000000) { rm = rt & 0x7fffffff; i = -1; continue; }
+		if (get_word (rt) != 0x4afc) continue;
+		uae_u32 end = get_long (rt + 6);
+		if (i1145_inrange (a, rt, end)) { i1145_nm (get_long (rt + 14), nb); write_log (_T("I1145R10   RESIDENT '%s' rt=%08x..%08x\n"), nb, rt, end); found++; }
+	}
+	// library / device / resource lists
+	static const int offs[3] = { 378, 350, 336 }; static const char *lnm[3] = { "Library", "Device", "Resource" };
+	for (int L = 0; L < 3; L++) {
+		uae_u32 n = get_long (eb + offs[L]);
+		for (int i = 0; i < 300 && n && get_long (n); i++, n = get_long (n)) {
+			uae_u32 neg = get_word (n + 16), pos = get_word (n + 18); i1145_nm (get_long (n + 10), nb);
+			if (i1145_inrange (a, n - neg, n + pos)) { write_log (_T("I1145R10   %s '%s' base=%08x neg=%u pos=%u (inside jump table/base)\n"), lnm[L], nb, n, neg, pos); found++; }
+			// jump table targets: 6 bytes per slot, 4ef9 xxxxxxxx
+			for (uae_u32 s = 6; s <= neg; s += 6) { uae_u32 j = n - s; if (get_word (j) == 0x4ef9) { uae_u32 t = get_long (j + 2); if (t <= a && a < t + 0x2000 && a - t < 0x2000 && 0) {} } }
+		}
+	}
+	// tasks: ready, wait, this
+	uae_u32 tasks[3] = { eb + 406, eb + 420, 0 };
+	uae_u32 tl[200]; int nt = 0; uae_u32 tt = get_long (eb + 276); if (tt) tl[nt++] = tt;
+	for (int L = 0; L < 2; L++) { uae_u32 n = get_long (tasks[L]); for (int i = 0; i < 100 && n && get_long (n) && nt < 200; i++, n = get_long (n)) tl[nt++] = n; }
+	for (int k = 0; k < nt; k++) {
+		uae_u32 t = tl[k]; i1145_nm (get_long (t + 10), nb); uae_u32 lo = get_long (t + 58), up = get_long (t + 62);
+		if (i1145_inrange (a, t, t + 92)) { write_log (_T("I1145R10   Task struct of '%s' %08x\n"), nb, t); found++; }
+		if (i1145_inrange (a, lo, up)) { write_log (_T("I1145R10   STACK of task '%s' %08x (%08x..%08x, sp=%08x)\n"), nb, t, lo, up, get_long (t + 54)); found++; }
+		if (get_byte (t + 8) == 13) { // process: pr_SegList at +128 (BPTR to array), seg[3] = list
+			uae_u32 sa = get_long (t + 128) << 2; uae_u32 seg = sa ? get_long (sa + 12) << 2 : 0;
+			for (int i = 0; i < 64 && seg; i++, seg = get_long (seg) << 2) { uae_u32 len = get_long (seg - 4); if (i1145_inrange (a, seg, seg + len)) { write_log (_T("I1145R10   SEGMENT #%d of process '%s' seg=%08x len=%u\n"), i, nb, seg, len); found++; } }
+		}
+	}
+	// memory headers
+	uae_u32 mh = get_long (eb + 322);
+	for (int i = 0; i < 50 && mh && get_long (mh); i++, mh = get_long (mh)) {
+		uae_u32 lo = get_long (mh + 20), up = get_long (mh + 24); i1145_nm (get_long (mh + 10), nb);
+		if (i1145_inrange (a, lo, up)) { write_log (_T("I1145R10   MemHeader '%s' %08x..%08x free=%u\n"), nb, lo, up, get_long (mh + 28)); found++;
+			for (uae_u32 c = get_long (mh + 16); c && i < 100000; c = get_long (c)) { uae_u32 sz = get_long (c + 4); if (i1145_inrange (a, c, c + sz)) { write_log (_T("I1145R10   address lies in a FREE chunk %08x size %u\n"), c, sz); found++; } if (c > a) break; } }
+	}
+	if (a < 0x200000) write_log (_T("I1145R10   chip RAM / low memory\n"));
+	if (a >= 0xf00000 && a < 0xf80000) write_log (_T("I1145R10   UAE rtarea\n"));
+	if (a >= 0xf80000 && a < 0x1000000) write_log (_T("I1145R10   Kickstart ROM\n"));
+	if (!found) write_log (_T("I1145R10   no owner found in resident/lib/dev/res/task/segment lists\n"));
+}
+void i1145_r10dump (const char *why)
+{
+	char nb[48]; uae_u32 eb = get_long (4), tt = eb ? get_long (eb + 276) : 0; i1145_tname (tt, nb);
+	uae_u32 pc = regs.pc, ipc = regs.instruction_pc, a7 = m68k_areg (regs, 7);
+	write_log (_T("I1145R10 ==== %s halted=%d stopped=%d pc=%08x ipc=%08x sr=%04x s=%d intmask=%d\n"), why, regs.halted, regs.stopped, pc, ipc, regs.sr, regs.s, regs.intmask);
+	write_log (_T("I1145R10 ops@pc:")); for (int i = 0; i < 8; i++) write_log (_T(" %04x"), get_word (pc + i * 2)); write_log (_T("\n"));
+	write_log (_T("I1145R10 ops@ipc:")); for (int i = 0; i < 8; i++) write_log (_T(" %04x"), get_word (ipc + i * 2)); write_log (_T("\n"));
+	write_log (_T("I1145R10 D:")); for (int i = 0; i < 8; i++) write_log (_T(" %08x"), m68k_dreg (regs, i)); write_log (_T("\n"));
+	write_log (_T("I1145R10 A:")); for (int i = 0; i < 8; i++) write_log (_T(" %08x"), m68k_areg (regs, i)); write_log (_T("\n"));
+	write_log (_T("I1145R10 USP=%08x ISP=%08x MSP=%08x VBR=%08x CACR=%08x PCR=%08x\n"), regs.usp, regs.isp, regs.msp, regs.vbr, regs.cacr, regs.pcr);
+	write_log (_T("I1145R10 stack:")); for (int i = 0; i < 16; i++) write_log (_T(" %08x"), get_long (a7 + i * 4)); write_log (_T("\n"));
+	write_log (_T("I1145R10 ThisTask=%08x '%s' state=%d\n"), tt, nb, tt ? get_byte (tt + 15) : -1);
+	write_log (_T("I1145R10 lastpcs:")); for (unsigned k = 1; k <= 16; k++) write_log (_T(" %08x"), i1145_pcr[(i1145_pn - k) & 15]); write_log (_T("\n"));
+	for (unsigned k = 1; k <= 16 && k <= i1145_rn; k++) { struct i1145_ex *e = &i1145_ring[(i1145_rn - k) & 1023]; write_log (_T("I1145R10 exc[-%u] nr=%d pc=%08x sr=%04x a7=%08x task=%08x\n"), k, e->nr, e->pc, e->sr, e->a7, e->tn); }
+	i1145_owner (pc);
+	if (ipc != pc && (ipc >> 8) != (pc >> 8)) i1145_owner (ipc);
+	uae_u32 ra = get_long (a7); if (ra != pc) { write_log (_T("I1145R10 owner of top-of-stack long %08x:\n"), ra); i1145_owner (ra); }
+	write_log (_T("I1145R10 ==== end %s\n"), why);
+}
+static void *i1145_wd (void *)
+{
+	const char *flag = getenv ("I1145_FLAG"); if (!flag) flag = "/tmp/i1145.dump";
+	for (;;) {
+		usleep (200000);
+		struct stat st; if (stat (flag, &st)) continue;
+		unlink (flag);
+		memset (i1145_hist_n, 0, sizeof i1145_hist_n);
+		usleep (1000000);
+		i1145_r10dump ("freeze-watchdog");
+		for (int t = 0; t < 10; t++) { unsigned best = 0, bi = 0; for (unsigned i = 0; i < 65536; i++) if (i1145_hist_n[i] > best) { best = i1145_hist_n[i]; bi = i; } if (!best) break; write_log (_T("I1145R10 hot pc %08x count %u\n"), i1145_hist_pc[bi], best); i1145_hist_n[bi] = 0; }
+		write_log (_T("I1145R10 hot-pc list end\n"));
+	}
+	return NULL;
+}
+static void i1145_wd_start (void) { i1145_wd_up = 1; pthread_t th; pthread_create (&th, NULL, i1145_wd, NULL); pthread_detach (th); }
+static void i1145_rec (int nr)
+{
+	i1145_install ();
+	struct i1145_ex *e = &i1145_ring[i1145_rn++ & 1023];
+	e->nr = nr; e->pc = m68k_getpc (); e->sr = regs.sr; e->a7 = m68k_areg (regs, 7);
+	uae_u32 eb = get_long (4); e->tn = eb ? get_long (eb + 276) : 0;
+	if (nr == 8 && regs.instruction_pc == 0xf83616) i1145_alert ("privviol-at-entry");
+	if (nr == 4 && m68k_getpc () < 0x100) { static int n4; if (n4++ < 6) {
+		write_log (_T("I1145A ILL#%d pc=%08x instrpc=%08x SR=%04x A7=%08x task=%08x\n"), n4, m68k_getpc (), regs.instruction_pc, regs.sr, m68k_areg (regs, 7), e->tn);
+		for (unsigned k = 1; k <= 16; k++) write_log (_T("I1145A   ill pc[-%u]=%08x op=%04x\n"), k, i1145_pcr[(i1145_pn - k) & 15], get_word (i1145_pcr[(i1145_pn - k) & 15]));
+		for (int i = 0; i < 8; i++) write_log (_T("I1145A   ill D%d=%08x A%d=%08x\n"), i, m68k_dreg (regs, i), i, m68k_areg (regs, i));
+		for (int i = 0; i < 8; i++) write_log (_T("I1145A   ill stk %08x: %08x\n"), m68k_areg (regs, 7) + i * 4, get_long (m68k_areg (regs, 7) + i * 4)); } }
+	if (nr == 3 || (nr == 8 && regs.instruction_pc == 0xf83616)) { static int nd; if (nd++ < 6) { write_log (_T("I1145R8 EXC nr=%d pc=%08x ipc=%08x A7=%08x\n"), nr, m68k_getpc (), regs.instruction_pc, m68k_areg (regs, 7)); i1145_frdump (nr == 3 ? "nr3" : "nr8"); } }
+	static int done3, doneirq, nirq;
+	if (nr == 26 && !doneirq && m68k_getpc () >= 0x40000000 && (regs.sr & 0x2000) && eb == 0x40000810) { doneirq = 1; write_log (_T("I1145 R7 IRQ26 vector -> %08x SR=%04x A7=%08x\n"), m68k_getpc (), regs.sr, m68k_areg (regs, 7)); i1145_r7 (m68k_getpc ()); }
+	if (nr == 3 && !done3 && eb == 0x40000810) {
+		int i; done3 = 1;
+		write_log (_T("I1145 AE pc=%08x instrpc=%08x faultaddr=%08x lastaddr=%08x SR=%04x\n"), m68k_getpc (), regs.instruction_pc, last_fault_for_exception_3, last_addr_for_exception_3, regs.sr);
+		for (i = 0; i < 8; i++) write_log (_T("I1145 AE D%d=%08x A%d=%08x\n"), i, m68k_dreg (regs, i), i, m68k_areg (regs, i));
+		for (i = -32; i < 32; i += 4) write_log (_T("I1145 AE code %08x: %08x\n"), m68k_getpc () + i, get_long (m68k_getpc () + i));
+		for (i = 0; i < 16; i++) write_log (_T("I1145 AE stk %08x: %08x\n"), m68k_areg (regs, 7) + i * 4, get_long (m68k_areg (regs, 7) + i * 4));
+		static const int offs[3] = { 0x17a, 0x15e, 0x150 };
+		for (int l = 0; l < 3; l++) {
+			uae_u32 n = get_long (eb + offs[l]); int guard = 0;
+			for (; n && guard < 80; guard++) {
+				uae_u32 nx = get_long (n), nm = get_long (n + 10), neg = get_word (n + 16), pos = get_word (n + 18);
+				char nb[32]; int j; for (j = 0; j < 31; j++) { nb[j] = get_byte (nm + j); if (!nb[j]) break; if (nb[j] < 32 || nb[j] > 126) nb[j] = '?'; } nb[j] = 0;
+				if (!nx) break;
+				write_log (_T("I1145 AE list%d %08x-%08x '%s'\n"), l, n - neg, n + pos, nb);
+				n = nx;
+			}
+		}
+		i1145_r7 (regs.instruction_pc);
+		{ uae_u32 t = get_long (eb + 276);
+		  write_log (_T("I1145 AE task name ptr %08x type %d pri %d sigalloc %08x\n"), get_long (t + 10), get_byte (t + 8), (int)(uae_s8)get_byte (t + 9), get_long (t + 18)); }
+	}
+}
 static void Exception_normal (int nr)
 {
 	uae_u32 currpc, newpc;
@@ -3005,10 +3385,12 @@ static void ExceptionX (int nr, uaecptr address)
 
 void REGPARAM2 Exception (int nr)
 {
+	i1145_rec (nr);
 	ExceptionX (nr, -1);
 }
 void REGPARAM2 ExceptionL (int nr, uaecptr address)
 {
+	i1145_rec (nr + 1000);
 	ExceptionX (nr, address);
 }
 
@@ -4629,6 +5011,7 @@ void cpu_halt (int id)
 	// id > 0: emulation halted.
 	if (!regs.halted) {
 		write_log (_T("CPU halted: reason = %d PC=%08x\n"), id, M68K_GETPC);
+		{ extern void i1145_r10dump (const char *); i1145_r10dump ("cpu_halt"); }
 		regs.halted = id;
 		gui_data.cpu_halted = id;
 		gui_led(LED_CPU, 0, -1);
@@ -5237,6 +5620,7 @@ static void m68k_run_2 (void)
 		TRY(prb) {
 			while (!exit) {
 				r->instruction_pc = m68k_getpc ();
+				i1145_step ();
 
 				r->opcode = x_get_iword(0);
 				count_instr (r->opcode);
@@ -6903,6 +7287,22 @@ void cpureset (void)
 	ab = &get_mem_bank (pc);
 	if (ab->check (pc, 2)) {
 		write_log (_T("CPU reset PC=%x (%s)..\n"), pc - 2, ab->name);
+		{
+			static int i1145_n;
+			if (i1145_n++ < 2) {
+				int i;
+				uae_u32 eb = get_long (4), tt = get_long (eb + 276), nm = tt ? get_long (tt + 10) : 0;
+				char nb[40]; for (i = 0; i < 39; i++) { nb[i] = nm ? get_byte (nm + i) : 0; if (!nb[i]) break; if (nb[i] < 32 || nb[i] > 126) nb[i] = '?'; } nb[i] = 0;
+				write_log (_T("I1145 reset#%d SR=%04x A7=%08x USP=%08x ISP=%08x ExecBase=%08x ThisTask=%08x name='%s' D0=%08x D1=%08x A0=%08x A1=%08x A5=%08x A6=%08x\n"),
+					i1145_n, regs.sr, m68k_areg (regs, 7), regs.usp, regs.isp, eb, tt, nb, m68k_dreg (regs, 0), m68k_dreg (regs, 1), m68k_areg (regs, 0), m68k_areg (regs, 1), m68k_areg (regs, 5), m68k_areg (regs, 6));
+				{ unsigned k; for (k = 0; k < 1024 && k < i1145_rn; k++) { struct i1145_ex *e = &i1145_ring[(i1145_rn - 1 - k) & 1023]; if (e->nr >= 25 && e->nr <= 31) continue; write_log (_T("I1145 ex[-%u] nr=%d pc=%08x sr=%04x a7=%08x task=%08x\n"), k, e->nr, e->pc, e->sr, e->a7, e->tn); } }
+				for (i = 0; i < 16; i++) write_log (_T("I1145 isp %08x: %08x\n"), regs.isp - 16 + i * 4, get_long (regs.isp - 16 + i * 4));
+				for (i = 0; i < 32; i++) write_log (_T("I1145 usp %08x: %08x\n"), regs.usp + i * 4, get_long (regs.usp + i * 4));
+				uaecptr sp = m68k_areg (regs, 7);
+				for (i = 0; i < 24; i++) write_log (_T("I1145 stk %08x: %08x\n"), sp + i * 4, get_long (sp + i * 4));
+				if (tt) { write_log (_T("I1145 task SPLower=%08x SPUpper=%08x SPReg=%08x\n"), get_long (tt + 58), get_long (tt + 62), get_long (tt + 54)); }
+			}
+		}
 		ins = get_word (pc);
 		custom_reset (false, false);
 		// did memory disappear under us?
