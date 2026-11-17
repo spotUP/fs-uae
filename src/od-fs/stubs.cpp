@@ -188,7 +188,7 @@ void target_fixup_options (struct uae_prefs *p) {
 }
 
 int debuggable (void) {
-    return 0;
+    return 1;
 }
 
 void logging_init(void) {
